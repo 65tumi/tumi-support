@@ -5,47 +5,39 @@
 
 const TelegramBot = require('node-telegram-bot-api');
 const config = require('./config');
-const websocket = require('./ws'); // Import WebSocket manager
+const websocket = require('./ws');
 
-// Initialize Telegram bot
+// Create bot
 const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
 
-// Map Telegram chatId <-> sessionId
-const telegramSessionMap = {}; // { chatId: sessionId }
+// Map to link Telegram chatIds to sessionIds
+const telegramSessionMap = {}; // { sessionId: chatId }
 
-// Notify admin/support when a new session is created
-function notifyNewSession(sessionId) {
-    if (!config.TELEGRAM_SUPPORT_CHAT_ID) return;
-    bot.sendMessage(
-        config.TELEGRAM_SUPPORT_CHAT_ID,
-        `🆕 New support session started. Session ID: ${sessionId}`
-    );
-}
-
-// Notify admin/support when a session ends
-function notifySessionEnded(sessionId) {
-    if (!config.TELEGRAM_SUPPORT_CHAT_ID) return;
-    bot.sendMessage(
-        config.TELEGRAM_SUPPORT_CHAT_ID,
-        `❌ Support session ended. Session ID: ${sessionId}`
-    );
-}
-
-// Handle incoming messages from Telegram
-bot.on('message', async (msg) => {
+// Handle incoming Telegram messages
+bot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
-    // Ignore messages from support chat for now
+    // Ignore messages from support/admin chat
     if (chatId.toString() === config.TELEGRAM_SUPPORT_CHAT_ID) return;
 
-    const sessionId = telegramSessionMap[chatId];
+    // Find existing session linked to this Telegram chat
+    let sessionId = Object.keys(telegramSessionMap).find(
+        id => telegramSessionMap[id] === chatId
+    );
+
+    // If no session linked, map to first active session
     if (!sessionId) {
-        bot.sendMessage(chatId, "⚠️ You don't have an active support session.");
-        return;
+        const queuedSessions = Object.keys(websocket.sessions);
+        if (!queuedSessions.length) {
+            bot.sendMessage(chatId, '⚠️ No active user session to connect.');
+            return;
+        }
+        sessionId = queuedSessions[0];
+        telegramSessionMap[sessionId] = chatId;
     }
 
-    // Forward Telegram message to the website user via WebSocket
+    // Forward Telegram message to the user via WebSocket
     websocket.sendToUser(sessionId, {
         type: 'support_message',
         text,
@@ -53,10 +45,22 @@ bot.on('message', async (msg) => {
     });
 });
 
-// Export functions for use in backend
+// Notify bot of new session (optional)
+function notifyNewSession(sessionId) {
+    const chatId = config.TELEGRAM_SUPPORT_CHAT_ID;
+    bot.sendMessage(chatId, `🟢 New user session started: ${sessionId}`);
+}
+
+// Notify bot when session ends
+function notifySessionEnded(sessionId) {
+    const chatId = telegramSessionMap[sessionId];
+    if (chatId) bot.sendMessage(chatId, '🔴 Your support session has ended.');
+    delete telegramSessionMap[sessionId];
+}
+
 module.exports = {
     bot,
+    telegramSessionMap,
     notifyNewSession,
-    notifySessionEnded,
-    telegramSessionMap
+    notifySessionEnded
 };
