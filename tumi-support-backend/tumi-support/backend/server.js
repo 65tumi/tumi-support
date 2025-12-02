@@ -7,14 +7,16 @@ const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const config = require('./config');
-const websocket = require('./ws'); // <- updated path
+const websocket = require('./ws');
 const bot = require('./bot');
 
 const app = express();
 
+// ----------------------
 // CORS setup
+// ----------------------
 app.use(cors({
-  origin: config.FRONTEND_URL,
+  origin: config.FRONTEND_URL, // now allows Netlify frontend
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -45,13 +47,15 @@ app.post('/api/start', (req, res) => {
     const data = websocket.createSession();
     bot.notifyNewSession?.(data.sessionId);
     res.json({
+      success: true,
       status: data.status,
       sessionId: data.sessionId,
-      position: data.position ?? null
+      position: data.position ?? null,
+      userId: data.userId ?? data.sessionId
     });
   } catch (err) {
     console.error('Error in /api/start:', err);
-    res.status(500).json({ error: 'Failed to start session' });
+    res.status(500).json({ success: false, error: 'Failed to start session' });
   }
 });
 
@@ -61,18 +65,19 @@ app.post('/api/start', (req, res) => {
 app.post('/api/end', (req, res) => {
   try {
     const { sessionId } = req.body || {};
-    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+    if (!sessionId) return res.status(400).json({ success: false, error: 'sessionId required' });
 
     const result = websocket.endSession(sessionId);
     bot.notifySessionEnded?.(sessionId);
 
     res.json({
+      success: true,
       status: 'ended',
       next: result?.next || null
     });
   } catch (err) {
     console.error('Error in /api/end:', err);
-    res.status(500).json({ error: 'Failed to end session' });
+    res.status(500).json({ success: false, error: 'Failed to end session' });
   }
 });
 
@@ -81,6 +86,7 @@ app.post('/api/end', (req, res) => {
 // ----------------------
 app.get('/api/queue-status', (req, res) => {
   res.json({
+    success: true,
     active: websocket.activeSession || null,
     queueSize: websocket.queue?.length || 0,
     queue: websocket.queue?.slice(0, 50) || []
@@ -117,3 +123,4 @@ process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
   process.exit(1);
 });
+
