@@ -7,19 +7,38 @@ const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const config = require('./config');
-const websocket = require('./ws');
+const websocket = require('./ws'); // WebSocket manager
 const bot = require('./bot');
 
 const app = express();
 
 // ----------------------
-// CORS setup
+// Safe CORS setup
 // ----------------------
+const allowedOrigins = [
+  'https://support-tumicodes.netlify.app',
+  'http://localhost:5500'
+];
+
+console.log('🌐 FRONTEND_URL used for CORS:', config.FRONTEND_URL);
+
 app.use(cors({
-  origin: config.FRONTEND_URL, // now allows Netlify frontend
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  origin: function(origin, callback){
+    // allow requests with no origin (like curl, postman)
+    if(!origin) return callback(null, true);
+
+    // allow only configured origins
+    if(allowedOrigins.includes(origin)){
+      return callback(null, true);
+    } else {
+      console.warn('❌ CORS blocked for origin:', origin);
+      return callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
 }));
+
 app.use(express.json());
 
 // ----------------------
@@ -47,15 +66,13 @@ app.post('/api/start', (req, res) => {
     const data = websocket.createSession();
     bot.notifyNewSession?.(data.sessionId);
     res.json({
-      success: true,
       status: data.status,
       sessionId: data.sessionId,
-      position: data.position ?? null,
-      userId: data.userId ?? data.sessionId
+      position: data.position ?? null
     });
   } catch (err) {
     console.error('Error in /api/start:', err);
-    res.status(500).json({ success: false, error: 'Failed to start session' });
+    res.status(500).json({ error: 'Failed to start session' });
   }
 });
 
@@ -65,19 +82,18 @@ app.post('/api/start', (req, res) => {
 app.post('/api/end', (req, res) => {
   try {
     const { sessionId } = req.body || {};
-    if (!sessionId) return res.status(400).json({ success: false, error: 'sessionId required' });
+    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
 
     const result = websocket.endSession(sessionId);
     bot.notifySessionEnded?.(sessionId);
 
     res.json({
-      success: true,
       status: 'ended',
       next: result?.next || null
     });
   } catch (err) {
     console.error('Error in /api/end:', err);
-    res.status(500).json({ success: false, error: 'Failed to end session' });
+    res.status(500).json({ error: 'Failed to end session' });
   }
 });
 
@@ -86,7 +102,6 @@ app.post('/api/end', (req, res) => {
 // ----------------------
 app.get('/api/queue-status', (req, res) => {
   res.json({
-    success: true,
     active: websocket.activeSession || null,
     queueSize: websocket.queue?.length || 0,
     queue: websocket.queue?.slice(0, 50) || []
@@ -97,8 +112,6 @@ app.get('/api/queue-status', (req, res) => {
 // Start HTTP + WebSocket Server
 // ----------------------
 const server = http.createServer(app);
-
-// Initialize WebSocket manager
 websocket.setup?.(server, bot);
 
 const PORT = config.PORT || 3000;
@@ -123,4 +136,5 @@ process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
   process.exit(1);
 });
+
 
