@@ -1,66 +1,55 @@
-/**
- * bot.js
- * Telegram bot integration for TumiCodes Support System
- */
+// bot.js
+const TelegramBot = require("node-telegram-bot-api");
+const { sendSupportReply } = require("./ws");
 
-const TelegramBot = require('node-telegram-bot-api');
-const config = require('./config');
-const websocket = require('./ws');
+const token = process.env.TELEGRAM_BOT_TOKEN;
+const adminChatId = process.env.ADMIN_CHAT_ID;
 
-// Create bot
-const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
+let bot;
 
-// Map to link Telegram chatIds to sessionIds
-const telegramSessionMap = {}; // { sessionId: chatId }
+// ------------------------------------------------------
+// Init bot
+// ------------------------------------------------------
+function telegramInit() {
+  bot = new TelegramBot(token, { polling: true });
 
-// Handle incoming Telegram messages
-bot.on('message', (msg) => {
+  console.log("🤖 Telegram Bot Started");
+
+  bot.on("message", msg => {
     const chatId = msg.chat.id;
-    const text = msg.text;
 
-    // Ignore messages from support/admin chat
-    if (chatId.toString() === config.TELEGRAM_SUPPORT_CHAT_ID) return;
+    // ignore user join messages
+    if (!msg.text) return;
 
-    // Find existing session linked to this Telegram chat
-    let sessionId = Object.keys(telegramSessionMap).find(
-        id => telegramSessionMap[id] === chatId
-    );
-
-    // If no session linked, map to first active session
-    if (!sessionId) {
-        const queuedSessions = Object.keys(websocket.sessions);
-        if (!queuedSessions.length) {
-            bot.sendMessage(chatId, '⚠️ No active user session to connect.');
-            return;
-        }
-        sessionId = queuedSessions[0];
-        telegramSessionMap[sessionId] = chatId;
+    // message must be in format:
+    // sessionId: reply text
+    const parts = msg.text.split(":");
+    if (parts.length < 2) {
+      bot.sendMessage(chatId, "❌ Format:\n\n`sessionId: reply text`");
+      return;
     }
 
-    // Forward Telegram message to the user via WebSocket
-    websocket.sendToUser(sessionId, {
-        type: 'support_message',
-        text,
-        timestamp: new Date().toISOString()
-    });
-});
+    const sessionId = parts.shift().trim();
+    const text = parts.join(":").trim();
 
-// Notify bot of new session (optional)
-function notifyNewSession(sessionId) {
-    const chatId = config.TELEGRAM_SUPPORT_CHAT_ID;
-    bot.sendMessage(chatId, `🟢 New user session started: ${sessionId}`);
+    console.log(`📤 Support reply to ${sessionId}:`, text);
+
+    // send back to website user
+    sendSupportReply(sessionId, text);
+  });
 }
 
-// Notify bot when session ends
-function notifySessionEnded(sessionId) {
-    const chatId = telegramSessionMap[sessionId];
-    if (chatId) bot.sendMessage(chatId, '🔴 Your support session has ended.');
-    delete telegramSessionMap[sessionId];
+// ------------------------------------------------------
+// Forward user message to Telegram admin
+// ------------------------------------------------------
+async function sendToTelegram(sessionId, text) {
+  const msg = `💬 New message\n\nSession: *${sessionId}*\n\n${text}`;
+
+  try {
+    await bot.sendMessage(adminChatId, msg, { parse_mode: "Markdown" });
+  } catch (e) {
+    console.log("⚠️ Telegram send error:", e.message);
+  }
 }
 
-module.exports = {
-    bot,
-    telegramSessionMap,
-    notifyNewSession,
-    notifySessionEnded
-};
+module.exports = { telegramInit, sendToTelegram };
