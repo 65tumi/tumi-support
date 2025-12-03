@@ -1,127 +1,88 @@
-/**
- * ws.js
- * WebSocket server for TumiCodes Support System
- */
+// ws.js
+const WebSocket = require("ws");
+const { sendToTelegram } = require("./bot");
 
-const WebSocket = require('ws');
+let clients = new Map(); // sessionId => ws connection
 
-let wss = null;
+function setupWebSocket(server) {
+  const wss = new WebSocket.Server({ server });
 
-// Store active sessions
-const sessions = {}; // { sessionId: ws }
-let activeSession = null;
-const queue = [];
+  console.log("🔌 WebSocket server initialized");
 
-function setup(server, botModule) {
-    wss = new WebSocket.Server({ server });
+  wss.on("connection", ws => {
+    console.log("🟢 WS client connected");
 
-    wss.on('connection', (ws) => {
-        let sessionId = null;
+    ws.on("message", async raw => {
+      let data;
 
-        ws.on('message', (message) => {
-            try {
-                const data = JSON.parse(message);
+      try { data = JSON.parse(raw); }
+      catch { return; }
 
-                if (data.type === 'request_activation' && data.sessionId) {
-                    sessionId = data.sessionId;
-                    sessions[sessionId] = ws;
+      // ---------------------------
+      // Register user connection
+      // ---------------------------
+      if (data.type === "request_activation") {
+        clients.set(data.sessionId, ws);
+        console.log(`🔗 Active WS: ${data.sessionId}`);
 
-                    // Add to queue if not active
-                    if (!activeSession) {
-                        activeSession = sessionId;
-                        ws.send(JSON.stringify({ type: 'connected' }));
-                    } else {
-                        if (!queue.includes(sessionId)) queue.push(sessionId);
-                        ws.send(JSON.stringify({ type: 'queue_update', position: queue.indexOf(sessionId) + 1, queueSize: queue.length }));
-                    }
+        ws.send(JSON.stringify({
+          type: "connected"
+        }));
 
-                    // Notify Telegram bot of new session
-                    botModule.notifyNewSession?.(sessionId);
-                }
-
-                // User chat message
-                if (data.type === 'chat' && sessionId) {
-                    const chatId = botModule.telegramSessionMap[sessionId];
-                    if (chatId) botModule.bot.sendMessage(chatId, data.text);
-                }
-
-                // Typing indicator
-                if (data.type === 'typing' && sessionId) {
-                    // Optional: send typing notification to Telegram (not typical)
-                }
-
-            } catch (err) {
-                console.error('WS message parse error:', err);
-            }
-        });
-
-        ws.on('close', () => {
-            if (!sessionId) return;
-
-            // Remove from sessions and queue
-            delete sessions[sessionId];
-            const queueIndex = queue.indexOf(sessionId);
-            if (queueIndex > -1) queue.splice(queueIndex, 1);
-
-            if (activeSession === sessionId) {
-                activeSession = queue.shift() || null;
-                if (activeSession && sessions[activeSession]) {
-                    sessions[activeSession].send(JSON.stringify({ type: 'connected' }));
-                }
-            }
-        });
-    });
-}
-
-// Send message to user by sessionId
-function sendToUser(sessionId, data) {
-    const ws = sessions[sessionId];
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(data));
-    }
-}
-
-// Create session helper
-function createSession() {
-    const sessionId = 'sess_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-    if (!activeSession) activeSession = sessionId;
-    else queue.push(sessionId);
-
-    return {
-        sessionId,
-        status: activeSession === sessionId ? 'connected' : 'queued',
-        position: queue.indexOf(sessionId) + 1
-    };
-}
-
-// End session helper
-function endSession(sessionId) {
-    if (!sessionId) return;
-
-    const ws = sessions[sessionId];
-    if (ws) ws.close();
-
-    delete sessions[sessionId];
-
-    const queueIndex = queue.indexOf(sessionId);
-    if (queueIndex > -1) queue.splice(queueIndex, 1);
-
-    if (activeSession === sessionId) {
-        activeSession = queue.shift() || null;
-        if (activeSession && sessions[activeSession]) {
-            sessions[activeSession].send(JSON.stringify({ type: 'connected' }));
+        // Activate session if none is active
+        if (!global.activeSession) {
+          global.activeSession = data.sessionId;
+          sessions.get(data.sessionId).status = "connected";
         }
-    }
 
-    return { next: activeSession };
+        return;
+      }
+
+      // ---------------------------
+      // User sent chat message
+      // ---------------------------
+      if (data.type === "chat") {
+        console.log(`📥 Message from user ${data.sessionId}:`, data.text);
+
+        ws.send(JSON.stringify({
+          type: "message_status",
+          status: "sent"
+        }));
+
+        // forward to telegram
+        await sendToTelegram(data.sessionId, data.text);
+        return;
+      }
+    });
+
+    ws.on("close", () => {
+      for (let [sessionId, socket] of clients.entries()) {
+        if (socket === ws) {
+          clients.delete(sessionId);
+          console.log(`🔴 WS disconnected: ${sessionId}`);
+        }
+      }
+    });
+  });
 }
 
-module.exports = {
-    setup,
-    sessions,
-    queue,
-    activeSession,
-    sendToUser,
-    createSession,
-    endSession
-};
+// --------------------------------------------------------
+// Send message from support to frontend
+// --------------------------------------------------------
+function sendSupportReply(sessionId, text) {
+  const client = clients.get(sessionId);
+  if (!client) {
+    console.log("⚠️ No active WS client for", sessionId);
+    return;
+  }
+
+  client.send(JSON.stringify({
+    type: "support_message",
+    text,
+    timestamp: new Date().toISOString()
+  }));
+}
+
+// --------------------------------------------------------
+
+module.exports = { setupWebSocket, sendSupportReply };
