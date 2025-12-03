@@ -1,140 +1,110 @@
-/**
- * server.js
- * Main Express server + WebSocket initializer
- */
+// server.js
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const bodyParser = require("body-parser");
 
-const http = require('http');
-const express = require('express');
-const cors = require('cors');
-const config = require('./config');
-const websocket = require('./ws'); // WebSocket manager
-const bot = require('./bot');
+const { setupWebSocket } = require("./ws");
+const { telegramInit } = require("./bot");
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-// ----------------------
-// Safe CORS setup
-// ----------------------
-const allowedOrigins = [
-  'https://support-tumicodes.netlify.app',
-  'http://localhost:5500'
-];
-
-console.log('🌐 FRONTEND_URL used for CORS:', config.FRONTEND_URL);
-
+// ----------- MIDDLEWARE --------------
 app.use(cors({
-  origin: function(origin, callback){
-    // allow requests with no origin (like curl, postman)
-    if(!origin) return callback(null, true);
-
-    // allow only configured origins
-    if(allowedOrigins.includes(origin)){
-      return callback(null, true);
-    } else {
-      console.warn('❌ CORS blocked for origin:', origin);
-      return callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET','POST','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization']
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
-
 app.use(express.json());
+app.use(bodyParser.json());
 
-// ----------------------
-// Health Check Endpoint
-// ----------------------
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    service: 'TumiCodes Support System',
-    version: '1.0.0',
-    queue: {
-      active: websocket.activeSession || null,
-      queueSize: websocket.queue?.length || 0,
-      sessions: Object.keys(websocket.sessions || {}).length
+// ----------- MEMORY DB ---------------
+global.sessions = new Map();   // sessionId => { status, queue }
+global.queue = [];             // waiting users
+global.activeSession = null;   // current sessionId
+
+// ------------------------------------
+// API: Start support session
+// ------------------------------------
+app.post("/api/start", (req, res) => {
+  const sessionId = Math.random().toString(36).substring(2, 12);
+
+  sessions.set(sessionId, { status: "waiting" });
+  queue.push(sessionId);
+
+  console.log(`🟢 New session: ${sessionId}`);
+
+  // If none online, activate
+  if (!activeSession) {
+    activeSession = sessionId;
+    sessions.get(sessionId).status = "connected";
+    console.log(`🎯 Session ${sessionId} active`);
+
+    return res.json({
+      sessionId,
+      status: "connected",
+      position: 1
+    });
+  }
+
+  return res.json({
+    sessionId,
+    status: "waiting",
+    position: queue.length
+  });
+});
+
+// ------------------------------------
+// API: Queue poll
+// ------------------------------------
+app.get("/api/queue-status", (req, res) => {
+  const sessionId = req.query.sessionId;
+
+  return res.json({
+    active: activeSession,
+    queue,
+    queueSize: queue.length
+  });
+});
+
+// ------------------------------------
+// API: End session
+// ------------------------------------
+app.post("/api/end", (req, res) => {
+  const { sessionId } = req.body;
+
+  queue = queue.filter(id => id !== sessionId);
+  sessions.delete(sessionId);
+
+  if (activeSession === sessionId) {
+    activeSession = queue.length ? queue.shift() : null;
+    if (activeSession) {
+      sessions.get(activeSession).status = "connected";
     }
-  });
-});
-
-// ----------------------
-// Start Support Session
-// ----------------------
-app.post('/api/start', (req, res) => {
-  try {
-    const data = websocket.createSession();
-    bot.notifyNewSession?.(data.sessionId);
-    res.json({
-      status: data.status,
-      sessionId: data.sessionId,
-      position: data.position ?? null
-    });
-  } catch (err) {
-    console.error('Error in /api/start:', err);
-    res.status(500).json({ error: 'Failed to start session' });
   }
+
+  console.log(`🔴 Session ended: ${sessionId}`);
+
+  return res.json({ status: "ended" });
 });
 
-// ----------------------
-// End Support Session
-// ----------------------
-app.post('/api/end', (req, res) => {
-  try {
-    const { sessionId } = req.body || {};
-    if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+// ------------------------------------
+// Health
+// ------------------------------------
+app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-    const result = websocket.endSession(sessionId);
-    bot.notifySessionEnded?.(sessionId);
+// ------------------------------------
+// Start HTTP
+// ------------------------------------
+const server = app.listen(PORT, () =>
+  console.log(`🚀 Server running on port ${PORT}`)
+);
 
-    res.json({
-      status: 'ended',
-      next: result?.next || null
-    });
-  } catch (err) {
-    console.error('Error in /api/end:', err);
-    res.status(500).json({ error: 'Failed to end session' });
-  }
-});
+// ------------------------------------
+// Init WebSocket + Telegram Bot
+// ------------------------------------
+setupWebSocket(server);
+telegramInit();
 
-// ----------------------
-// Queue Status
-// ----------------------
-app.get('/api/queue-status', (req, res) => {
-  res.json({
-    active: websocket.activeSession || null,
-    queueSize: websocket.queue?.length || 0,
-    queue: websocket.queue?.slice(0, 50) || []
-  });
-});
-
-// ----------------------
-// Start HTTP + WebSocket Server
-// ----------------------
-const server = http.createServer(app);
-websocket.setup?.(server, bot);
-
-const PORT = config.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`TumiSupport backend listening on port ${PORT}`);
-});
-
-// ----------------------
-// Graceful Shutdown
-// ----------------------
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down...');
-  process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down...');
-  process.exit(0);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-  process.exit(1);
-});
-
-
+module.exports = app;
