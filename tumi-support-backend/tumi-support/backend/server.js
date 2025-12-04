@@ -1,110 +1,124 @@
-// server.js
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
+/**
+ * server.js
+ * Express server + WebSocket initializer
+ */
 
-const { setupWebSocket } = require("./ws");
-const { telegramInit } = require("./bot");
+const http = require('http');
+const express = require('express');
+const cors = require('cors');
+const config = require('./config');
+const websocket = require('./ws');
+const bot = require('./bot');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// ----------- MIDDLEWARE --------------
+// --------- Safe CORS (allow Netlify + localhost) ----------
+const allowedOrigins = [
+  (config.FRONTEND_URL || '').replace(/\/$/, ''), // configured frontend
+  'http://localhost:5500',
+  'http://127.0.0.1:5500',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000'
+].filter(Boolean);
+
+console.log('Allowed origins for CORS:', allowedOrigins);
+
 app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  origin: function(origin, callback) {
+    // allow non-browser tools (no origin)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    console.warn('CORS blocked origin:', origin);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
 }));
+
 app.use(express.json());
-app.use(bodyParser.json());
 
-// ----------- MEMORY DB ---------------
-global.sessions = new Map();   // sessionId => { status, queue }
-global.queue = [];             // waiting users
-global.activeSession = null;   // current sessionId
-
-// ------------------------------------
-// API: Start support session
-// ------------------------------------
-app.post("/api/start", (req, res) => {
-  const sessionId = Math.random().toString(36).substring(2, 12);
-
-  sessions.set(sessionId, { status: "waiting" });
-  queue.push(sessionId);
-
-  console.log(`🟢 New session: ${sessionId}`);
-
-  // If none online, activate
-  if (!activeSession) {
-    activeSession = sessionId;
-    sessions.get(sessionId).status = "connected";
-    console.log(`🎯 Session ${sessionId} active`);
-
-    return res.json({
-      sessionId,
-      status: "connected",
-      position: 1
+// ---------------- Health ----------------
+app.get('/health', (req, res) => {
+  try {
+    res.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      service: 'TumiCodes Support System',
+      version: '1.0.0',
+      queue: {
+        active: websocket.activeSession || null,
+        queueSize: websocket.queue.length,
+        sessions: Object.keys(websocket.sessions).length
+      }
     });
+  } catch (err) {
+    console.error('Health error:', err);
+    res.status(500).json({ status: 'error' });
   }
-
-  return res.json({
-    sessionId,
-    status: "waiting",
-    position: queue.length
-  });
 });
 
-// ------------------------------------
-// API: Queue poll
-// ------------------------------------
-app.get("/api/queue-status", (req, res) => {
-  const sessionId = req.query.sessionId;
-
-  return res.json({
-    active: activeSession,
-    queue,
-    queueSize: queue.length
-  });
-});
-
-// ------------------------------------
-// API: End session
-// ------------------------------------
-app.post("/api/end", (req, res) => {
-  const { sessionId } = req.body;
-
-  queue = queue.filter(id => id !== sessionId);
-  sessions.delete(sessionId);
-
-  if (activeSession === sessionId) {
-    activeSession = queue.length ? queue.shift() : null;
-    if (activeSession) {
-      sessions.get(activeSession).status = "connected";
-    }
+// ---------------- Start session ----------------
+app.post('/api/start', (req, res) => {
+  try {
+    const data = websocket.createSession();
+    // notify support/admin in Telegram (non-blocking)
+    try { bot.notifyNewSession?.(data.sessionId); } catch (e) { console.warn('bot.notifyNewSession error', e); }
+    res.json({
+      success: true,
+      status: data.status,
+      sessionId: data.sessionId,
+      position: data.position ?? null
+    });
+  } catch (err) {
+    console.error('Error in /api/start:', err);
+    res.status(500).json({ success: false, error: 'Failed to start session' });
   }
-
-  console.log(`🔴 Session ended: ${sessionId}`);
-
-  return res.json({ status: "ended" });
 });
 
-// ------------------------------------
-// Health
-// ------------------------------------
-app.get("/health", (req, res) => res.json({ status: "ok" }));
+// ---------------- End session ----------------
+app.post('/api/end', (req, res) => {
+  try {
+    const { sessionId } = req.body || {};
+    if (!sessionId) return res.status(400).json({ success: false, error: 'sessionId required' });
 
-// ------------------------------------
-// Start HTTP
-// ------------------------------------
-const server = app.listen(PORT, () =>
-  console.log(`🚀 Server running on port ${PORT}`)
-);
+    const result = websocket.endSession(sessionId);
+    try { bot.notifySessionEnded?.(sessionId); } catch (e) { console.warn('bot.notifySessionEnded error', e); }
 
-// ------------------------------------
-// Init WebSocket + Telegram Bot
-// ------------------------------------
-setupWebSocket(server);
-telegramInit();
+    res.json({ success: true, status: 'ended', next: result?.next || null });
+  } catch (err) {
+    console.error('Error in /api/end:', err);
+    res.status(500).json({ success: false, error: 'Failed to end session' });
+  }
+});
+
+// ---------------- Queue status ----------------
+app.get('/api/queue-status', (req, res) => {
+  try {
+    res.json({
+      success: true,
+      active: websocket.activeSession || null,
+      queueSize: websocket.queue.length,
+      queue: websocket.queue.slice(0, 50)
+    });
+  } catch (err) {
+    console.error('Error /api/queue-status', err);
+    res.status(500).json({ success: false, error: 'Failed to get queue status' });
+  }
+});
+
+// ---------------- Start server and WS ----------------
+const PORT = config.PORT || 3000;
+const server = http.createServer(app);
+
+websocket.setup(server, bot); // attach WS, also passes bot module for sending to Telegram if needed
+
+server.listen(PORT, () => {
+  console.log(`TumiSupport backend listening on port ${PORT}`);
+});
+
+// ---------------- graceful ----------------
+process.on('SIGINT', () => { console.log('SIGINT received, shutting down'); process.exit(0); });
+process.on('SIGTERM', () => { console.log('SIGTERM received, shutting down'); process.exit(0); });
+process.on('uncaughtException', (err) => { console.error('uncaughtException', err); process.exit(1); });
 
 module.exports = app;
