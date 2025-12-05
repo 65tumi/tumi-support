@@ -1,133 +1,165 @@
 /**
  * ws.js
- * WebSocket session + message routing
+ * WebSocket + queue/session manager
  */
 
-const { WebSocketServer } = require('ws');
-const { v4: uuid } = require('uuid');
+const { v4: uuidv4 } = require('uuid');
+const WebSocket = require('ws');
 
+// ------------------
 // State
-let wss = null;
+// ------------------
+let activeSession = null;           // sessionId of current active user
+let sessions = {};                  // sessionId: { ws }
+let queue = [];                     // waiting sessionIds
 
-let sessions = {};       // sessionId -> websocket
-let queue = [];          // queued sessionIds
-let activeSession = null;
-let bot = null;
-
-// ----------------------
-// Create a new support session
-// ----------------------
+// ------------------
+// Create new session
+// ------------------
 function createSession() {
-  const sessionId = uuid();
-  queue.push(sessionId);
+    const sessionId = uuidv4();
 
-  const position = queue.length - 1;
+    // if no one active -> activate now
+    if (!activeSession) {
+        activeSession = sessionId;
+        sessions[sessionId] = { ws: null, status: "active" };
 
-  if (!activeSession) promoteNextSession();
+        return {
+            status: "active",
+            sessionId
+        };
+    }
 
-  return {
-    status: "pending",
-    sessionId,
-    position
-  };
+    // otherwise -> push into queue
+    queue.push(sessionId);
+    sessions[sessionId] = { ws: null, status: "queued" };
+
+    return {
+        status: "queued",
+        sessionId,
+        position: queue.length
+    };
 }
 
-// ----------------------
-// Promote next session
-// ----------------------
-function promoteNextSession() {
-  if (activeSession || queue.length === 0) return;
-
-  activeSession = queue.shift();
-
-  if (bot) {
-    bot.notifyNextUp(activeSession);
-  }
-}
-
-// ----------------------
-// End a support session
-// ----------------------
+// ------------------
+// End session
+// ------------------
 function endSession(sessionId) {
-  if (sessions[sessionId]) {
-    try { sessions[sessionId].close(); } catch {}
+    // if this is active
+    if (activeSession === sessionId) {
+        // close ws if exists
+        try {
+            sessions[sessionId]?.ws?.close();
+        } catch (_) {}
+
+        delete sessions[sessionId];
+        activeSession = null;
+
+        const next = queue.shift();
+
+        if (next) {
+            activeSession = next;
+            sessions[next].status = "active";
+
+            // tell frontend via ws if connected
+            try {
+                sessions[next]?.ws?.send(JSON.stringify({
+                    type: "system",
+                    message: "Support is available now, you are connected."
+                }));
+            } catch (_) {}
+
+            return { next };
+        }
+
+        return { next: null };
+    }
+
+    // remove from queue
+    queue = queue.filter(id => id !== sessionId);
+
+    try {
+        sessions[sessionId]?.ws?.close();
+    } catch (_) {}
+
     delete sessions[sessionId];
-  }
-
-  if (activeSession === sessionId) {
-    activeSession = null;
-    promoteNextSession();
-  }
-
-  return { next: activeSession };
+    return { next: null };
 }
 
-// ----------------------
-// Send a message to user
-// ----------------------
-function sendToUser(sessionId, text) {
-  const ws = sessions[sessionId];
-  if (!ws || ws.readyState !== 1) return;
+// ------------------
+// Attach WS Server
+// ------------------
+function setup(server, bot) {
+    const wss = new WebSocket.Server({ server });
 
-  ws.send(JSON.stringify({
-    from: "support",
-    text,
-    time: Date.now()
-  }));
-}
+    wss.on('connection', (ws, req) => {
+        // Expect sessionId from query
+        const url = new URL(req.url, "http://localhost");
+        const sessionId = url.searchParams.get("sessionId");
 
-// ----------------------
-// WebSocket setup
-// ----------------------
-function setup(server, botModule) {
-  bot = botModule;
-
-  wss = new WebSocketServer({ server });
-
-  wss.on('connection', (ws) => {
-    // client must send sessionId first
-    ws.on('message', (data) => {
-      try {
-        const msg = JSON.parse(data);
-
-        // register socket with sessionId
-        if (msg.type === "init") {
-          sessions[msg.sessionId] = ws;
-          return;
+        if (!sessionId || !sessions[sessionId]) {
+            ws.send(JSON.stringify({
+                type: "error",
+                message: "Invalid or expired session"
+            }));
+            ws.close();
+            return;
         }
 
-        // incoming user message
-        if (msg.type === "msg") {
-          const sessionId = msg.sessionId;
-          const text = msg.text;
+        // Attach ws to session
+        sessions[sessionId].ws = ws;
 
-          if (bot) bot.relayToTelegram(sessionId, text);
+        if (activeSession === sessionId) {
+            ws.send(JSON.stringify({
+                type: "system",
+                message: "You are connected to TumiCodes Support."
+            }));
+        } else {
+            const position = queue.indexOf(sessionId) + 1;
+
+            ws.send(JSON.stringify({
+                type: "system",
+                message: `You are in queue. Position: ${position}`
+            }));
         }
 
-      } catch (err) {
-        console.error("WS message error:", err);
-      }
+        // Receive messages
+        ws.on("message", (raw) => {
+            const msg = raw.toString();
+
+            // forwarding:
+            if (activeSession === sessionId) {
+                bot.sendMessageToTelegram(sessionId, msg);
+            }
+
+            ws.send(JSON.stringify({
+                type: "user",
+                message: msg
+            }));
+        });
+
+        // Disconnect handler
+        ws.on("close", () => {
+            endSession(sessionId);
+        });
     });
 
-    ws.on('close', () => {
-      // Remove session
-      const id = Object.keys(sessions).find(s => sessions[s] === ws);
-      if (id) delete sessions[id];
-    });
-  });
+    console.log("WebSocket initialized");
 }
 
+
 // ----------------------
-// Export
+// Exports
 // ----------------------
 module.exports = {
-  setup,
-  createSession,
-  endSession,
-  sendToUser,
-  sessions,
-  queue,
-  get activeSession() {
-    return activeSession;
-  }
+    setup,
+
+    // session systems used by server.js
+    createSession,
+    endSession,
+
+    // state exported for server.js
+    activeSession,
+    queue,
+    sessions
 };
