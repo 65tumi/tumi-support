@@ -1,6 +1,6 @@
 /**
- * server.js
- * Main Express server + WebSocket initializer
+ * Updated server.js
+ * Express + WebSocket backend for TumiCodes Support
  */
 
 const http = require('http');
@@ -22,7 +22,6 @@ const allowed = [
   'http://localhost:3000',
   'http://127.0.0.1:3000'
 ];
-
 console.log("Allowed origins for CORS:", allowed);
 
 app.use(cors({
@@ -41,7 +40,7 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     service: 'TumiCodes Support System',
-    version: '1.0.0',
+    version: '1.0.1',
     queue: {
       active: websocket.activeSession || null,
       queueSize: websocket.queue.length,
@@ -78,6 +77,10 @@ app.post('/api/end', (req, res) => {
     const { sessionId } = req.body || {};
     if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
 
+    if (!websocket.sessions[sessionId] && websocket.activeSession !== sessionId) {
+      return res.status(400).json({ error: 'Invalid or expired session' });
+    }
+
     const result = websocket.endSession(sessionId);
     bot.notifySessionEnded(sessionId);
 
@@ -96,6 +99,15 @@ app.post('/api/end', (req, res) => {
 // Queue Status
 // ----------------------
 app.get('/api/queue-status', (req, res) => {
+  const { sessionId } = req.query;
+
+  if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+
+  // Validate session
+  if (!websocket.sessions[sessionId] && websocket.activeSession !== sessionId) {
+    return res.status(400).json({ error: 'Invalid or expired session' });
+  }
+
   res.json({
     active: websocket.activeSession,
     queueSize: websocket.queue.length,
@@ -107,7 +119,6 @@ app.get('/api/queue-status', (req, res) => {
 // Init HTTP + WS
 // ----------------------
 const server = http.createServer(app);
-
 websocket.setup(server, bot);
 
 const PORT = config.PORT || 3000;
@@ -116,7 +127,7 @@ server.listen(PORT, () => {
 });
 
 // ----------------------
-// Shutdown
+// Graceful Shutdown
 // ----------------------
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down');
@@ -132,4 +143,5 @@ process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
   process.exit(1);
 });
+
 
