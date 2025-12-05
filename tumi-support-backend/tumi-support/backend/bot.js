@@ -104,6 +104,15 @@ function notifySessionEnded(sessionId) {
     console.warn('notifySessionEnded error', err);
   }
 }
+module.exports = {
+    sendToTelegram: (msg) => {
+        console.log("SEND TO TELEGRAM:", msg);
+    },
+
+    notifyDisconnect: () => {
+        console.log("CLIENT DISCONNECTED");
+    }
+};
 
 // sendToTelegram - called by ws.js when a website user sends a message
 async function sendToTelegram(sessionId, text) {
